@@ -76,6 +76,24 @@ curl http://10.0.0.136/toggle-lights
 He smoothly squeezes into the struggle for a few seconds, then does a wide-eyed
 **relief** beat and returns to normal blinking.
 
+### Controlling real lights (Home Assistant)
+
+`/toggle-lights` also toggles real lights via **Home Assistant**: the firmware
+makes a plain-HTTP `POST /api/services/homeassistant/toggle` to HA on your LAN
+(no TLS, no per-vendor crypto). Configure it in `wifi.env`:
+
+```bash
+export HA_HOST="10.0.0.x"        # Home Assistant IP (not a hostname)
+export HA_PORT="8123"
+export HA_TOKEN="long-lived-token"   # HA profile -> Long-Lived Access Tokens
+export HA_ENTITIES="switch.living_room,switch.bedroom"   # entities to toggle
+```
+
+HA's integrations handle the actual devices (e.g. the Tuya/Smart Life
+integration for Smart Life switches), so the ESP32 stays brand-agnostic. If
+`HA_TOKEN` is empty the animation still runs and the toggle just logs that it's
+unconfigured.
+
 ### Behaviour
 
 - **Resting:** eyes blink smoothly every 1–4 s (with an occasional double-blink).

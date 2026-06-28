@@ -17,7 +17,9 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
-use embassy_net::{IpListenEndpoint, Runner, StackResources};
+use embassy_net::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, Runner, StackResources};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 
 use esp_backtrace as _;
@@ -68,6 +70,28 @@ const WORK_BURST_MS: u32 = 4000;
 // DHCP hostname (option 12) so the device shows up by name in the router. For a
 // stable address, give it a DHCP reservation in the router keyed on its MAC.
 const HOSTNAME: &str = "esp-eyes";
+
+// Home Assistant connection (baked in from wifi.env at build time). Empty values
+// just mean "no light control" — the animation still works.
+const HA_HOST: &str = match option_env!("HA_HOST") {
+    Some(s) => s,
+    None => "",
+};
+const HA_PORT: &str = match option_env!("HA_PORT") {
+    Some(s) => s,
+    None => "8123",
+};
+const HA_TOKEN: &str = match option_env!("HA_TOKEN") {
+    Some(s) => s,
+    None => "",
+};
+const HA_ENTITIES: &str = match option_env!("HA_ENTITIES") {
+    Some(s) => s,
+    None => "",
+};
+
+// Set when `/toggle-lights` is hit; the lights task wakes and calls Home Assistant.
+static TOGGLE_LIGHTS: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 // Shared trigger: the deadline (embassy-time millis) until which he should be
 // "working". The HTTP task writes it; the animation loop reads it. AtomicU32 is
@@ -122,7 +146,7 @@ async fn main(spawner: Spawner) -> ! {
     let (stack, runner) = embassy_net::new(
         interfaces.station,
         embassy_net::Config::dhcpv4(dhcp),
-        mk_static!(StackResources<4>, StackResources::<4>::new()),
+        mk_static!(StackResources<6>, StackResources::<6>::new()),
         seed,
     );
 
@@ -132,6 +156,7 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(net_task(runner).unwrap());
     spawner.spawn(report_ip(stack).unwrap());
     spawner.spawn(http_server(stack).unwrap());
+    spawner.spawn(lights_task(stack).unwrap());
 
     // ---- Display + animation (runs forever in main) ------------------------
     let mut delay = Delay::new();
@@ -269,7 +294,8 @@ async fn http_server(stack: embassy_net::Stack<'static>) {
         let body: &[u8] = if triggered {
             let until = (Instant::now().as_millis() as u32).wrapping_add(WORK_BURST_MS);
             WORK_UNTIL_MS.store(until, Ordering::Relaxed);
-            println!("http: /toggle-lights -> struggling for {WORK_BURST_MS}ms");
+            TOGGLE_LIGHTS.signal(()); // wake the lights task to call Home Assistant
+            println!("http: /toggle-lights -> struggling + toggling lights");
             b"toggled: struggling for a few seconds\n"
         } else {
             b"esp32 eyes. GET /toggle-lights to trigger the struggle.\n"
@@ -312,6 +338,86 @@ fn http_header(buf: &mut [u8; 96], content_len: usize) -> &[u8] {
     );
     let n = w.n;
     &buf[..n]
+}
+
+/// Wakes when `/toggle-lights` fires and asks Home Assistant to toggle the
+/// configured entities. No-ops (with a log) if HA isn't configured in wifi.env.
+#[embassy_executor::task]
+async fn lights_task(stack: embassy_net::Stack<'static>) {
+    loop {
+        TOGGLE_LIGHTS.wait().await;
+        match toggle_ha(stack).await {
+            Ok(()) => println!("ha: toggled {HA_ENTITIES}"),
+            Err(e) => println!("ha: toggle failed ({e})"),
+        }
+    }
+}
+
+/// `POST /api/services/homeassistant/toggle` to Home Assistant over plain HTTP
+/// (LAN, no TLS). `homeassistant.toggle` flips any switch/light entity.
+async fn toggle_ha(stack: embassy_net::Stack<'static>) -> Result<(), &'static str> {
+    if HA_HOST.is_empty() || HA_TOKEN.is_empty() {
+        return Err("not configured — set HA_HOST/HA_TOKEN in wifi.env");
+    }
+    let ip: Ipv4Address = HA_HOST.parse().map_err(|_| "HA_HOST must be an IP")?;
+    let port: u16 = HA_PORT.parse().unwrap_or(8123);
+
+    let mut rx = [0u8; 512];
+    let mut tx = [0u8; 512];
+    let mut sock = TcpSocket::new(stack, &mut rx, &mut tx);
+    sock.set_timeout(Some(Duration::from_secs(5)));
+    sock.connect(IpEndpoint::new(IpAddress::Ipv4(ip), port))
+        .await
+        .map_err(|_| "connect failed")?;
+
+    // JSON body: {"entity_id":["switch.a","switch.b"]}
+    let mut body: heapless::String<256> = heapless::String::new();
+    body.push_str("{\"entity_id\":[").map_err(|_| "entities too long")?;
+    for (i, e) in HA_ENTITIES
+        .split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .enumerate()
+    {
+        use core::fmt::Write as _;
+        if i > 0 {
+            body.push(',').map_err(|_| "entities too long")?;
+        }
+        write!(body, "\"{e}\"").map_err(|_| "entities too long")?;
+    }
+    body.push_str("]}").map_err(|_| "entities too long")?;
+
+    let mut req: heapless::String<512> = heapless::String::new();
+    {
+        use core::fmt::Write as _;
+        write!(
+            req,
+            "POST /api/services/homeassistant/toggle HTTP/1.1\r\n\
+             Host: {HA_HOST}\r\n\
+             Authorization: Bearer {HA_TOKEN}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n",
+            body.len()
+        )
+        .map_err(|_| "request too long")?;
+    }
+
+    use embedded_io_async::Write as _;
+    sock.write_all(req.as_bytes()).await.map_err(|_| "write failed")?;
+    sock.write_all(body.as_bytes()).await.map_err(|_| "write failed")?;
+    sock.flush().await.map_err(|_| "flush failed")?;
+
+    // Check the status line; HA returns 200 or 201 on success.
+    let mut buf = [0u8; 64];
+    let n = sock.read(&mut buf).await.map_err(|_| "no response")?;
+    sock.close();
+    let status = core::str::from_utf8(&buf[..n]).unwrap_or("");
+    if status.contains(" 200") || status.contains(" 201") {
+        Ok(())
+    } else {
+        Err("HA returned non-2xx")
+    }
 }
 
 /// Render one eye into the cell framebuffer and blit it (flicker-free).
