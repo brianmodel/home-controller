@@ -1,16 +1,20 @@
-//! Smooth eye-blinking animation on the Adafruit ESP32-S3 TFT Feather's
-//! built-in 240x135 ST7789 display.
+//! Smooth eye-blinking + "struggle" animation on the Adafruit ESP32-S3 TFT
+//! Feather's built-in 240x135 ST7789 display.
 //!
-//! The blink timing/easing lives in the host-tested `eye-anim` crate; this file
-//! just owns the hardware: power the panel, bring up SPI + the ST7789, and draw
-//! the two ellipses each tick.
+//! Resting state: the eyes blink occasionally. Press the onboard **BOOT** button
+//! (GPIO0) to toggle the *working* state — he squeezes his eyes shut hard and
+//! trembles like he's straining at a task. Press again to relax back to normal
+//! blinking. All transitions are smoothly eased (see the host-tested `eye-anim`).
+//!
+//! The same toggle is just `Eyes::set_working(bool)`, so it can later be driven
+//! by a network / home-controller signal instead of the button.
 #![no_std]
 #![no_main]
 
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::delay::Delay;
-use esp_hal::gpio::{Level, Output, OutputConfig};
+use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
 use esp_hal::main;
 use esp_hal::rng::Rng;
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
@@ -27,29 +31,35 @@ use mipidsi::interface::SpiInterface;
 use mipidsi::options::{ColorInversion, Orientation, Rotation};
 use mipidsi::{models::ST7789, Builder};
 
-use eye_anim::{EyeConfig, Eyes};
+use eye_anim::{EyeConfig, EyeFrame, EyeRender, Eyes};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
 // ---- Adafruit ESP32-S3 TFT Feather, built-in ST7789 pinout -----------------
-// (from the board's Arduino variant: SCK=36 MOSI=35 CS=7 DC=39 RST=40,
-//  backlight=45, panel power=21)
-// The display is a 1.14" 240x135 panel. mipidsi is told the controller's native
-// 135x240 window plus this panel's offset, then rotated into landscape.
-// If the image is shifted or rotated, tweak OFFSET / ROTATION below.
+// SCK=36 MOSI=35 CS=7 DC=39 RST=40, backlight=45, panel power=21, BOOT button=0.
 const PANEL_OFFSET: (u16, u16) = (52, 40);
 const ROTATION: Rotation = Rotation::Deg270;
+
+// Each eye is drawn inside a "cell" a bit larger than the eye, so the eye can
+// move (tremble) and grow (the wide-eyed relief beat) within it while we still
+// blit the same fixed rectangle each frame (which is what keeps it flicker-free).
+// Margin covers tremble (±3px) plus the relief overshoot (~25% bigger).
+const CELL_W: usize = EyeConfig::feather_tft().eye_w as usize + 16;
+const CELL_H: usize = EyeConfig::feather_tft().eye_h as usize + 20;
 
 #[main]
 fn main() -> ! {
     let p = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
     let mut delay = Delay::new();
 
-    // Power the panel and turn the backlight on (held high for the program's life).
+    // Power the panel and turn the backlight on.
     let _panel_power = Output::new(p.GPIO21, Level::High, OutputConfig::default());
     let _backlight = Output::new(p.GPIO45, Level::High, OutputConfig::default());
 
-    // SPI bus on the display's SCK/MOSI pins.
+    // BOOT button: active-low, internal pull-up.
+    let button = Input::new(p.GPIO0, InputConfig::default().with_pull(Pull::Up));
+
+    // SPI bus on the display's SCK/MOSI pins @ 80 MHz.
     let spi = Spi::new(
         p.SPI2,
         SpiConfig::default()
@@ -80,70 +90,72 @@ fn main() -> ! {
 
     display.clear(Rgb565::BLACK).unwrap();
 
-    // Seed the blink RNG from the hardware RNG so the idle pattern differs each run.
     let seed = Rng::new().random();
-
     let cfg = EyeConfig::feather_tft();
     let mut eyes = Eyes::new(cfg, seed, 0);
 
-    // Reusable off-screen buffer for one eye's bounding box. We render the eye
-    // into RAM here (clear + ellipse) and then blit the whole box to the panel in
-    // a single contiguous SPI write. Because the panel pixels go straight from the
-    // old eye to the new one (never flashing black in between), there is no flicker.
-    const EW: usize = EyeConfig::feather_tft().eye_w as usize;
-    const EH: usize = EyeConfig::feather_tft().eye_h as usize;
-    let mut eye_buf = [Rgb565::BLACK; EW * EH];
+    // One reusable cell framebuffer (drawn + blitted for each eye in turn).
+    let mut cell = [Rgb565::BLACK; CELL_W * CELL_H];
 
-    // Track the last drawn height so we only repaint when it changes — rock-steady
-    // while open, repaint only mid-blink.
-    let mut last_h = -1;
+    // Only repaint when the frame changes (rock-steady while open & idle; repaints
+    // every tick while blinking / trembling).
+    let mut last_frame: Option<EyeFrame> = None;
+
+    // Debounced edge detection for the toggle button.
+    let mut prev_low = false;
+    let mut last_toggle_ms = 0u64;
+
     let started = Instant::now();
-
     loop {
         let now_ms = started.elapsed().as_millis();
-        let frame = eyes.update(now_ms);
 
-        if frame.left_h != last_h {
-            render_eye(&mut display, &mut eye_buf, cfg.left_center(), EW, EH, frame.left_h);
-            render_eye(&mut display, &mut eye_buf, cfg.right_center(), EW, EH, frame.right_h);
-            last_h = frame.left_h;
+        // Toggle working state on a fresh button press.
+        let low = button.is_low();
+        if low && !prev_low && now_ms.saturating_sub(last_toggle_ms) > 250 {
+            let next = !eyes.is_working();
+            eyes.set_working(next);
+            last_toggle_ms = now_ms;
+        }
+        prev_low = low;
+
+        let frame = eyes.update(now_ms);
+        if last_frame != Some(frame) {
+            render_eye(&mut display, &mut cell, cfg.left_center(), frame.left);
+            render_eye(&mut display, &mut cell, cfg.right_center(), frame.right);
+            last_frame = Some(frame);
         }
 
-        // Fast tick → many animation steps across the 80ms blink (≈20 frames),
-        // which combined with the flicker-free blit gives smooth motion.
         delay.delay_millis(4);
     }
 }
 
-/// Render one eye into `buf` (clear + centered white ellipse) and blit the whole
-/// box to the panel at `center` in a single contiguous write (flicker-free).
-fn render_eye<D, const N: usize>(
-    display: &mut D,
-    buf: &mut [Rgb565; N],
-    center: (i32, i32),
-    w: usize,
-    max_h: usize,
-    cur_h: i32,
-) where
+/// Render one eye into the cell framebuffer and blit the whole cell to its fixed
+/// screen rectangle (centered on the eye's resting position) in one SPI write.
+fn render_eye<D>(display: &mut D, cell: &mut [Rgb565; CELL_W * CELL_H], nominal: (i32, i32), eye: EyeRender)
+where
     D: DrawTarget<Color = Rgb565>,
 {
     let white = PrimitiveStyle::with_fill(Rgb565::WHITE);
 
-    // Draw into the RAM framebuffer (reborrow so `buf` is usable again after).
+    // Top-left of the cell in screen coordinates (fixed at the resting center).
+    let cell_x = nominal.0 - CELL_W as i32 / 2;
+    let cell_y = nominal.1 - CELL_H as i32 / 2;
+
+    // Draw into RAM: clear, then the (possibly offset/squished) ellipse.
     {
-        let mut fbuf = FrameBuf::new(&mut *buf, w, max_h);
-        let _ = fbuf.clear(Rgb565::BLACK);
-        let h = cur_h.max(1) as u32;
-        // Center the ellipse vertically within the max-height box.
-        let top = (max_h as i32 - h as i32) / 2;
-        let _ = Ellipse::new(Point::new(0, top), Size::new(w as u32, h))
+        let mut fb = FrameBuf::new(&mut *cell, CELL_W, CELL_H);
+        let _ = fb.clear(Rgb565::BLACK);
+        let ex = (eye.cx - eye.w / 2) - cell_x;
+        let ey = (eye.cy - eye.h / 2) - cell_y;
+        let _ = Ellipse::new(Point::new(ex, ey), Size::new(eye.w as u32, eye.h as u32))
             .into_styled(white)
-            .draw(&mut fbuf);
+            .draw(&mut fb);
     }
 
-    // Blit the box to its screen position in one shot.
-    let (cx, cy) = center;
-    let box_tl = Point::new(cx - w as i32 / 2, cy - max_h as i32 / 2);
-    let area = Rectangle::new(box_tl, Size::new(w as u32, max_h as u32));
-    let _ = display.fill_contiguous(&area, buf.iter().copied());
+    // Blit the cell to its fixed position.
+    let area = Rectangle::new(
+        Point::new(cell_x, cell_y),
+        Size::new(CELL_W as u32, CELL_H as u32),
+    );
+    let _ = display.fill_contiguous(&area, cell.iter().copied());
 }

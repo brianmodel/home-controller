@@ -61,8 +61,19 @@ Connect the board over USB, then:
 make eyes            # build (release) + flash the eye-blinking animation
 ```
 
-You should see two white eyes on black that blink smoothly every 1–4 seconds
+**Resting state:** two white eyes on black that blink smoothly every 1–4 seconds
 (with an occasional quick double-blink).
+
+**Work / struggle:** press the onboard **BOOT** button (GPIO0) to toggle the
+*working* state — he smoothly squeezes his eyes shut hard and trembles, clenching
+tighter in pulses, like he's straining at a task. Press **BOOT** again and he
+releases: his eyes pop **wide with relief**, settle, and return to normal
+blinking. Every transition is smoothly eased and you can toggle at any moment.
+
+The trigger is just `Eyes::set_working(bool)`, so the BOOT button can later be
+replaced by a network / home-controller signal. The full state machine
+(`Idle → EnterWork → Working → ExitWork → Relief → Idle`) and all of its timing
+live in `eye-anim/src/lib.rs` and are unit-tested with `cargo test`.
 
 ### Hardware: Adafruit ESP32-S3 TFT Feather (built-in ST7789)
 
