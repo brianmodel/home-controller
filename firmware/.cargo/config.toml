@@ -1,0 +1,26 @@
+# Build + flash configuration for the ESP32-S3 (Xtensa).
+# This file is only picked up when running cargo from inside firmware/, which is
+# why host `cargo test` (run from the repo root) is unaffected by it.
+#
+#   cargo build            -> compile firmware for xtensa-esp32s3-none-elf
+#   cargo run              -> build, flash over USB, open the serial monitor
+#   cargo run --release    -> same, optimized build
+
+[target.xtensa-esp32s3-none-elf]
+# One command to flash + watch serial. espflash auto-detects the port and chip.
+runner = "espflash flash --monitor"
+
+[env]
+# Controls esp-println's logger verbosity (init_logger_from_env reads this).
+ESP_LOG = "info"
+
+[build]
+target = "xtensa-esp32s3-none-elf"
+# esp-hal's build script injects the `-Tlinkall.x` linker script and search
+# paths automatically, so the only flag we need here is `-nostartfiles`.
+rustflags = ["-C", "link-arg=-nostartfiles"]
+
+[unstable]
+# The esp toolchain doesn't ship a prebuilt core/alloc for this target, so we
+# build them from the bundled rust-src.
+build-std = ["alloc", "core"]

@@ -1,0 +1,5 @@
+[toolchain]
+# The Espressif Rust fork (installed via `espup`) — required to compile for the
+# Xtensa ESP32-S3 target. Build the firmware with `cargo +esp ...` or rely on
+# this file selecting it automatically inside the project.
+channel = "esp"

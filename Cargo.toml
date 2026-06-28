@@ -1,0 +1,37 @@
+# Virtual workspace. Two members:
+#   - eye-anim:  pure, no_std-friendly logic. Host-testable with `cargo test`.
+#   - firmware:  the ESP32-S3 binaries (no_std). Built for xtensa, flashed with
+#                `cargo run` from inside the firmware/ directory.
+#
+# The split exists so the animation math can be unit-tested on your Mac without
+# any hardware, while the firmware compiles for the Xtensa target via
+# firmware/.cargo/config.toml.
+[workspace]
+resolver = "2"
+members = ["eye-anim", "firmware"]
+# `cargo test` / `cargo build` from the repo root only touch the host-testable
+# crate; firmware is built explicitly from its own directory (it needs the
+# Xtensa target + build-std that live in firmware/.cargo/config.toml).
+default-members = ["eye-anim"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+eye-anim = { path = "eye-anim" }
+
+# Firmware profiles live at the workspace root (cargo ignores profiles set in
+# non-root members). These apply to the xtensa firmware build.
+[profile.dev]
+opt-level = "s"
+lto = false
+
+[profile.release]
+codegen-units = 1
+debug = 2
+debug-assertions = false
+incremental = false
+lto = "fat"
+opt-level = "s"
+overflow-checks = false
