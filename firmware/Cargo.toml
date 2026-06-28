@@ -27,6 +27,7 @@ embassy-executor = "0.10.0"
 embassy-net = { version = "0.9.1", features = [
     "tcp",
     "udp",
+    "multicast",        # for the mDNS responder (join 224.0.0.251)
     "dhcpv4",
     "dhcpv4-hostname",
     "medium-ethernet",

@@ -67,10 +67,11 @@ wifi: connected
 net: ready! visit  http://10.0.0.136/toggle-lights  (or try http://esp-eyes/toggle-lights)
 ```
 
-Then, from any device on the same network:
+Then, from any device on the same network — by name (mDNS) or IP:
 
 ```bash
-curl http://10.0.0.136/toggle-lights
+curl http://esp-eyes.local/toggle-lights
+# or: curl http://10.0.0.136/toggle-lights
 ```
 
 He smoothly squeezes into the struggle for a few seconds, then does a wide-eyed
@@ -88,15 +89,13 @@ The HTTP handler is intentionally tiny (`http_server` in `lights.rs`); the trigg
 is just a shared atomic deadline the animation loop reads, so it's easy to point
 at real light control later. Networking is esp-radio + esp-rtos + embassy-net.
 
-### A fixed hostname instead of the IP
+### Reaching it by name (`esp-eyes.local`)
 
-The firmware sends a DHCP **hostname** (`esp-eyes`, set near the top of
-`lights.rs`). Some routers register that in their local DNS so `http://esp-eyes/`
-works — but many (incl. eero/Google-style) don't. For a hostname that works
-reliably on the LAN regardless of router you need an **mDNS** responder answering
-`esp-eyes.local` (e.g. the `edge-mdns` crate, or a small hand-rolled UDP responder
-on `224.0.0.251:5353`). A static IP (reserve one in the router, or configure
-`embassy_net::Config::ipv4_static`) is the simplest always-works option.
+The firmware runs a small **mDNS responder** (`mdns` task in `lights.rs`) that
+answers `esp-eyes.local` on the LAN, so you don't need the changing DHCP IP — it
+works on macOS/iOS/Linux out of the box, regardless of router. Change the name via
+the `HOSTNAME` constant near the top of `lights.rs`. (A DHCP hostname is also sent,
+which some routers expose as `http://esp-eyes/`, but that's router-dependent.)
 
 ## Hardware (Adafruit ESP32-S3 TFT Feather, built-in ST7789)
 
