@@ -1062,7 +1062,6 @@ dependencies = [
  "embassy-time",
  "embedded-graphics",
  "embedded-graphics-framebuf",
- "embedded-hal 1.0.0",
  "embedded-hal-bus",
  "embedded-io-async 0.7.0",
  "esp-alloc",
@@ -1073,7 +1072,7 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "eye-anim",
- "log",
+ "heapless 0.9.3",
  "mipidsi",
  "static_cell",
 ]

@@ -3,16 +3,7 @@ name = "firmware"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "ESP32-S3 firmware binaries (no_std)"
-default-run = "blinky"
-
-[[bin]]
-name = "blinky"
-path = "src/bin/blinky.rs"
-
-[[bin]]
-name = "eyes"
-path = "src/bin/eyes.rs"
+description = "ESP32-S3 networked eyes firmware (no_std)"
 
 [[bin]]
 name = "lights"
@@ -24,7 +15,6 @@ eye-anim.workspace = true
 # Display stack for the ST7789 TFT.
 embedded-graphics = "0.8.1"
 embedded-graphics-framebuf = "0.5.0"
-embedded-hal = "1.0.0"
 embedded-hal-bus = "0.3.0"
 mipidsi = "0.10.0"
 
@@ -38,10 +28,12 @@ embassy-net = { version = "0.9.1", features = [
     "tcp",
     "udp",
     "dhcpv4",
+    "dhcpv4-hostname",
     "medium-ethernet",
 ] }
 embassy-time = "0.5.0"
 embedded-io-async = "0.7.0"
+heapless = "0.9"  # must match embassy-net's heapless for the DHCP hostname type
 static_cell = "2.1.1"
 
 esp-hal = { version = "1.1.1", features = ["esp32s3", "unstable"] }
@@ -58,4 +50,3 @@ esp-println = { version = "0.17.0", default-features = false, features = [
     "colors",
 ] }
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32s3"] }
-log = "0.4"

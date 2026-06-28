@@ -8,9 +8,8 @@
 //!
 //!     curl http://<device-ip>/toggle-lights
 //!
-//! The animation runs concurrently with the network stack. The onboard BOOT
-//! button still toggles the struggle too. `/toggle-lights` is the placeholder
-//! for the real goal — controlling lights.
+//! The animation runs concurrently with the network stack. `/toggle-lights` is
+//! the placeholder for the real goal — controlling lights.
 #![no_std]
 #![no_main]
 
@@ -24,7 +23,7 @@ use embassy_time::{Duration, Instant, Timer};
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::delay::Delay;
-use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
+use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::rng::Rng;
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
@@ -65,6 +64,11 @@ const PASSWORD: &str = match option_env!("WIFI_PASSWORD") {
 
 // How long one `/toggle-lights` hit makes him struggle.
 const WORK_BURST_MS: u32 = 4000;
+
+// DHCP hostname (option 12). Many routers register this in their local DNS, so
+// you can often reach the device by name (e.g. http://esp-eyes/) instead of a
+// changing IP. For a guaranteed `<name>.local` you'd add an mDNS responder.
+const HOSTNAME: &str = "esp-eyes";
 
 // Shared trigger: the deadline (embassy-time millis) until which he should be
 // "working". The HTTP task writes it; the animation loop reads it. AtomicU32 is
@@ -114,9 +118,11 @@ async fn main(spawner: Spawner) -> ! {
     // ---- embassy-net stack with DHCP --------------------------------------
     let rng = Rng::new();
     let seed = ((rng.random() as u64) << 32) | rng.random() as u64;
+    let mut dhcp = embassy_net::DhcpConfig::default();
+    dhcp.hostname = Some(heapless::String::try_from(HOSTNAME).unwrap());
     let (stack, runner) = embassy_net::new(
         interfaces.station,
-        embassy_net::Config::dhcpv4(Default::default()),
+        embassy_net::Config::dhcpv4(dhcp),
         mk_static!(StackResources<4>, StackResources::<4>::new()),
         seed,
     );
@@ -132,7 +138,6 @@ async fn main(spawner: Spawner) -> ! {
     let mut delay = Delay::new();
     let _panel_power = Output::new(p.GPIO21, Level::High, OutputConfig::default());
     let _backlight = Output::new(p.GPIO45, Level::High, OutputConfig::default());
-    let button = Input::new(p.GPIO0, InputConfig::default().with_pull(Pull::Up));
 
     let spi = Spi::new(
         p.SPI2,
@@ -166,24 +171,13 @@ async fn main(spawner: Spawner) -> ! {
     let mut eyes = Eyes::new(cfg, seed, 0);
     let mut cell = [Rgb565::BLACK; CELL_W * CELL_H];
     let mut last_frame: Option<EyeFrame> = None;
-    let mut prev_low = false;
-    let mut button_latched = false;
-    let mut last_toggle_ms = 0u64;
 
     loop {
         let now_ms = Instant::now().as_millis();
 
-        // BOOT button still toggles a persistent struggle.
-        let low = button.is_low();
-        if low && !prev_low && now_ms.saturating_sub(last_toggle_ms) > 250 {
-            button_latched = !button_latched;
-            last_toggle_ms = now_ms;
-        }
-        prev_low = low;
-
-        // Working if the button is latched OR we're inside an endpoint burst.
-        let endpoint_active = (now_ms as u32) < WORK_UNTIL_MS.load(Ordering::Relaxed);
-        eyes.set_working(button_latched || endpoint_active);
+        // Struggle while we're inside an endpoint-triggered burst.
+        let working = (now_ms as u32) < WORK_UNTIL_MS.load(Ordering::Relaxed);
+        eyes.set_working(working);
 
         let frame = eyes.update(now_ms);
         if last_frame != Some(frame) {
@@ -227,7 +221,8 @@ async fn net_task(mut runner: Runner<'static, Interface<'static>>) {
 async fn report_ip(stack: embassy_net::Stack<'static>) {
     stack.wait_config_up().await;
     if let Some(cfg) = stack.config_v4() {
-        println!("net: ready! visit  http://{}/toggle-lights", cfg.address.address());
+        let ip = cfg.address.address();
+        println!("net: ready! visit  http://{ip}/toggle-lights  (or try http://{HOSTNAME}/toggle-lights)");
     }
 }
 
