@@ -67,11 +67,10 @@ wifi: connected
 net: ready! visit  http://10.0.0.136/toggle-lights  (or try http://esp-eyes/toggle-lights)
 ```
 
-Then, from any device on the same network — by name (mDNS) or IP:
+Then, from any device on the same network:
 
 ```bash
-curl http://esp-eyes.local/toggle-lights
-# or: curl http://10.0.0.136/toggle-lights
+curl http://10.0.0.136/toggle-lights
 ```
 
 He smoothly squeezes into the struggle for a few seconds, then does a wide-eyed
@@ -89,13 +88,16 @@ The HTTP handler is intentionally tiny (`http_server` in `lights.rs`); the trigg
 is just a shared atomic deadline the animation loop reads, so it's easy to point
 at real light control later. Networking is esp-radio + esp-rtos + embassy-net.
 
-### Reaching it by name (`esp-eyes.local`)
+### A stable address (DHCP reservation)
 
-The firmware runs a small **mDNS responder** (`mdns` task in `lights.rs`) that
-answers `esp-eyes.local` on the LAN, so you don't need the changing DHCP IP — it
-works on macOS/iOS/Linux out of the box, regardless of router. Change the name via
-the `HOSTNAME` constant near the top of `lights.rs`. (A DHCP hostname is also sent,
-which some routers expose as `http://esp-eyes/`, but that's router-dependent.)
+The device uses DHCP, so its IP can change. The clean, OS-independent fix is a
+**DHCP reservation** in your router: bind the device's MAC to a fixed IP, then
+always use that IP. The firmware sends a DHCP hostname (`esp-eyes`, the `HOSTNAME`
+constant in `lights.rs`) so it's easy to spot in the router's device list.
+
+(mDNS / `esp-eyes.local` is the alternative, but it's inconsistent across
+platforms and slow on macOS — it waits ~5s for an IPv6 answer the device doesn't
+send — so a reservation is preferred.)
 
 ## Hardware (Adafruit ESP32-S3 TFT Feather, built-in ST7789)
 

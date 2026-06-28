@@ -17,8 +17,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
-use embassy_net::udp::{PacketMetadata, UdpSocket};
-use embassy_net::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, Runner, StackResources};
+use embassy_net::{IpListenEndpoint, Runner, StackResources};
 use embassy_time::{Duration, Instant, Timer};
 
 use esp_backtrace as _;
@@ -66,15 +65,9 @@ const PASSWORD: &str = match option_env!("WIFI_PASSWORD") {
 // How long one `/toggle-lights` hit makes him struggle.
 const WORK_BURST_MS: u32 = 4000;
 
-// Hostname. Used both for the DHCP hostname (option 12, router-dependent) and
-// for the mDNS responder below, which answers `<HOSTNAME>.local` queries so the
-// device is reachable at e.g. http://esp-eyes.local/ on the LAN regardless of
-// router.
+// DHCP hostname (option 12) so the device shows up by name in the router. For a
+// stable address, give it a DHCP reservation in the router keyed on its MAC.
 const HOSTNAME: &str = "esp-eyes";
-
-// mDNS multicast group / port (link-local, never routed).
-const MDNS_V4: Ipv4Address = Ipv4Address::new(224, 0, 0, 251);
-const MDNS_PORT: u16 = 5353;
 
 // Shared trigger: the deadline (embassy-time millis) until which he should be
 // "working". The HTTP task writes it; the animation loop reads it. AtomicU32 is
@@ -129,7 +122,7 @@ async fn main(spawner: Spawner) -> ! {
     let (stack, runner) = embassy_net::new(
         interfaces.station,
         embassy_net::Config::dhcpv4(dhcp),
-        mk_static!(StackResources<6>, StackResources::<6>::new()),
+        mk_static!(StackResources<4>, StackResources::<4>::new()),
         seed,
     );
 
@@ -139,7 +132,6 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(net_task(runner).unwrap());
     spawner.spawn(report_ip(stack).unwrap());
     spawner.spawn(http_server(stack).unwrap());
-    spawner.spawn(mdns(stack).unwrap());
 
     // ---- Display + animation (runs forever in main) ------------------------
     let mut delay = Delay::new();
@@ -223,130 +215,13 @@ async fn net_task(mut runner: Runner<'static, Interface<'static>>) {
     runner.run().await
 }
 
-/// Minimal mDNS responder: answers `A` queries for `<HOSTNAME>.local` with our
-/// IPv4 so the device is reachable by name on the LAN (e.g. esp-eyes.local),
-/// independent of the router. Only handles the one record we care about.
-#[embassy_executor::task]
-async fn mdns(stack: embassy_net::Stack<'static>) {
-    stack.wait_config_up().await;
-    let ip = loop {
-        if let Some(cfg) = stack.config_v4() {
-            break cfg.address.address();
-        }
-        Timer::after(Duration::from_millis(200)).await;
-    };
-    // Receive packets sent to the mDNS multicast group.
-    let _ = stack.join_multicast_group(IpAddress::Ipv4(MDNS_V4));
-
-    let mut rx_meta = [PacketMetadata::EMPTY; 8];
-    let mut rx_buf = [0u8; 512];
-    let mut tx_meta = [PacketMetadata::EMPTY; 8];
-    let mut tx_buf = [0u8; 512];
-    let mut sock = UdpSocket::new(stack, &mut rx_meta, &mut rx_buf, &mut tx_meta, &mut tx_buf);
-    if sock.bind(MDNS_PORT).is_err() {
-        return;
-    }
-    println!("mdns: answering for {HOSTNAME}.local");
-
-    let mut buf = [0u8; 512];
-    loop {
-        let n = match sock.recv_from(&mut buf).await {
-            Ok((n, _)) => n,
-            Err(_) => continue,
-        };
-        if query_is_for_us(&buf[..n]) {
-            let mut out = [0u8; 128];
-            let len = build_a_response(&mut out, ip.octets());
-            let dst = IpEndpoint::new(IpAddress::Ipv4(MDNS_V4), MDNS_PORT);
-            let _ = sock.send_to(&out[..len], dst).await;
-        }
-    }
-}
-
-/// True if `pkt` is an mDNS query whose first question asks for the A (or ANY)
-/// record of `<HOSTNAME>.local`.
-fn query_is_for_us(pkt: &[u8]) -> bool {
-    // DNS header is 12 bytes; QDCOUNT is at offset 4.
-    if pkt.len() < 12 || u16::from_be_bytes([pkt[4], pkt[5]]) == 0 {
-        return false;
-    }
-    let mut pos = 12;
-    let label0 = match read_label(pkt, &mut pos) {
-        Some(l) => l,
-        None => return false,
-    };
-    let label1 = match read_label(pkt, &mut pos) {
-        Some(l) => l,
-        None => return false,
-    };
-    // Expect exactly `<HOSTNAME>.local` followed by the root (0) label.
-    if !label0.eq_ignore_ascii_case(HOSTNAME.as_bytes())
-        || !label1.eq_ignore_ascii_case(b"local")
-        || pos >= pkt.len()
-        || pkt[pos] != 0
-    {
-        return false;
-    }
-    pos += 1;
-    if pos + 2 > pkt.len() {
-        return false;
-    }
-    let qtype = u16::from_be_bytes([pkt[pos], pkt[pos + 1]]);
-    qtype == 1 || qtype == 255 // A or ANY
-}
-
-/// Read one length-prefixed DNS label, advancing `pos`. Returns `None` at the
-/// terminating zero, on a compression pointer, or if malformed.
-fn read_label<'a>(pkt: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
-    let len = *pkt.get(*pos)? as usize;
-    if len == 0 || len & 0xC0 != 0 {
-        return None;
-    }
-    let start = *pos + 1;
-    let end = start + len;
-    if end > pkt.len() {
-        return None;
-    }
-    *pos = end;
-    Some(&pkt[start..end])
-}
-
-/// Build an mDNS response packet announcing `<HOSTNAME>.local A <ip>`.
-fn build_a_response(out: &mut [u8], ip: [u8; 4]) -> usize {
-    let mut p = 0;
-    let mut put = |bytes: &[u8], p: &mut usize| {
-        out[*p..*p + bytes.len()].copy_from_slice(bytes);
-        *p += bytes.len();
-    };
-    // Header: id=0, flags=0x8400 (response + authoritative), 0 questions, 1 answer.
-    put(&[0, 0], &mut p);
-    put(&0x8400u16.to_be_bytes(), &mut p);
-    put(&0u16.to_be_bytes(), &mut p); // QDCOUNT
-    put(&1u16.to_be_bytes(), &mut p); // ANCOUNT
-    put(&0u16.to_be_bytes(), &mut p); // NSCOUNT
-    put(&0u16.to_be_bytes(), &mut p); // ARCOUNT
-    // NAME: <HOSTNAME>.local.
-    put(&[HOSTNAME.len() as u8], &mut p);
-    put(HOSTNAME.as_bytes(), &mut p);
-    put(&[5], &mut p);
-    put(b"local", &mut p);
-    put(&[0], &mut p);
-    // TYPE A, CLASS IN with cache-flush bit, TTL 120s, RDLENGTH 4, RDATA = ip.
-    put(&1u16.to_be_bytes(), &mut p);
-    put(&0x8001u16.to_be_bytes(), &mut p);
-    put(&120u32.to_be_bytes(), &mut p);
-    put(&4u16.to_be_bytes(), &mut p);
-    put(&ip, &mut p);
-    p
-}
-
 /// Print the IP once DHCP succeeds, so we know where to curl.
 #[embassy_executor::task]
 async fn report_ip(stack: embassy_net::Stack<'static>) {
     stack.wait_config_up().await;
     if let Some(cfg) = stack.config_v4() {
         let ip = cfg.address.address();
-        println!("net: ready! visit  http://{HOSTNAME}.local/toggle-lights  (or http://{ip}/toggle-lights)");
+        println!("net: ready! visit  http://{ip}/toggle-lights  (reserve this IP in your router for a fixed address)");
     }
 }
 
