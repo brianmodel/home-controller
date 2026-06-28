@@ -4,12 +4,13 @@ Bare-metal (`no_std`) Rust firmware for the **ESP32-S3**, built with
 [`esp-hal`](https://github.com/esp-rs/esp-hal). Designed to be easy to **test**
 (pure logic runs on your Mac) and easy to **flash** (one command).
 
-Two firmware binaries:
-- **`eyes`** — a smooth, animated pair of blinking eyes on the TFT (the goal),
+Three firmware binaries:
+- **`lights`** — the eyes **plus WiFi + an HTTP server**, so the struggle can be
+  triggered remotely (`GET /toggle-lights`). The headline build.
+- **`eyes`** — the offline animation: smooth blinking + a BOOT-button struggle,
   in the spirit of
   [esp32-smooth-eye-blinking](https://github.com/dmtrKovalenko/esp32-smooth-eye-blinking).
-- **`blinky`** — a minimal serial-heartbeat + LED toggle (the starting point /
-  "is it alive?" check).
+- **`blinky`** — a minimal serial-heartbeat + LED toggle (the "is it alive?" check).
 
 ## Layout
 
@@ -94,6 +95,50 @@ If the image is rotated or shifted, tweak `ROTATION` / `PANEL_OFFSET` near the
 top of that file. Eye geometry and blink timing live in
 `eye-anim/src/lib.rs` (`EyeConfig`, and the `CLOSE_MS` / `OPEN_MS` constants) so
 you can tune them and re-check with `cargo test`.
+
+## Trigger over WiFi (`lights` binary)
+
+The `lights` binary runs everything `eyes` does **and** joins WiFi and serves a
+tiny HTTP endpoint, so the struggle can be triggered remotely — the first step
+toward controlling real lights from external systems.
+
+### One-time: WiFi credentials (kept out of git)
+
+```bash
+cp wifi.env.example wifi.env       # then edit wifi.env with your network
+```
+
+`wifi.env` is gitignored. The Makefile sources it and the firmware bakes the
+credentials in at build time via `option_env!` — they are never committed and
+never written to a filesystem on the device.
+
+### Run it
+
+```bash
+make lights          # build (release) + flash + open the serial monitor
+```
+
+Watch the serial output for the assigned IP:
+
+```
+wifi: connecting to 'your-ssid'
+wifi: connected
+net: ready! visit  http://10.0.0.136/toggle-lights
+```
+
+Then, from any device on the same network:
+
+```bash
+curl http://10.0.0.136/toggle-lights
+```
+
+He squeezes into the struggle for a few seconds, then does the relief beat and
+returns to normal blinking. The BOOT button still toggles the struggle too.
+
+The endpoint logic is intentionally tiny (`http_server` in
+`firmware/src/bin/lights.rs`); the trigger is just an atomic deadline that the
+animation loop reads, so it's easy to point at real light control later. The
+networking stack is esp-radio + esp-rtos + embassy-net (see `firmware/Cargo.toml`).
 
 ## Blinky / serial heartbeat
 

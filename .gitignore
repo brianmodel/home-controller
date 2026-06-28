@@ -2,3 +2,6 @@
 **/target
 .DS_Store
 
+# Real WiFi credentials — never commit. Copy wifi.env.example -> wifi.env.
+wifi.env
+

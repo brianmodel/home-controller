@@ -9,17 +9,21 @@
 #   make release   compile the firmware (release, optimized)
 #   make flash     build + flash + open serial monitor  (alias: make run)
 #   make eyes      build + flash the smooth eye-blinking animation
+#   make lights    build + flash the WiFi build (needs wifi.env); /toggle-lights
 #   make blinky    build + flash the simple blinky/heartbeat
 #   make monitor   just open the serial monitor on the connected board
 #   make check     fast type-check of the firmware
 #   make clean     remove build artifacts
 
-ESP_ENV := $(HOME)/export-esp.sh
+ESP_ENV  := $(HOME)/export-esp.sh
+WIFI_ENV := wifi.env
 # `. $(ESP_ENV)` sources the Espressif env (PATH to the Xtensa GCC, etc.)
-ESP     := . $(ESP_ENV) >/dev/null 2>&1;
-FW      := cd firmware &&
+ESP      := . $(ESP_ENV) >/dev/null 2>&1;
+# Source WiFi creds if present (only needed by the `lights` binary).
+WIFI     := [ -f $(WIFI_ENV) ] && . ./$(WIFI_ENV);
+FW       := cd firmware &&
 
-.PHONY: test build release flash run monitor check clean
+.PHONY: test build release flash run eyes blinky lights monitor check clean
 
 test:
 	cargo test
@@ -38,6 +42,11 @@ eyes:
 
 blinky:
 	$(ESP) $(FW) cargo run --release --bin blinky
+
+# Networked build: needs WiFi creds from wifi.env (copy wifi.env.example first).
+lights:
+	@[ -f $(WIFI_ENV) ] || { echo "Missing $(WIFI_ENV). Run: cp wifi.env.example wifi.env  and fill it in."; exit 1; }
+	$(WIFI) $(ESP) $(FW) cargo run --release --bin lights
 
 monitor:
 	espflash monitor
